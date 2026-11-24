@@ -6,7 +6,6 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.util.Log
-import android.view.View
 import android.view.ViewGroup
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
@@ -15,7 +14,9 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
+import java.util.concurrent.atomic.AtomicBoolean
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -276,23 +277,7 @@ fun BaseGameWebView(
                 }
             }
 
-            // Slim loading progress bar
-            AnimatedVisibility(
-                visible = isPageLoading && loadError == null,
-                enter = fadeIn(),
-                exit = fadeOut()
-            ) {
-                LinearProgressIndicator(
-                    progress = { pageLoadingProgress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(2.dp),
-                    color = StudioGold,
-                    trackColor = StudioSurfaceElevated
-                )
-            }
-
-            // WebView Game Viewport
+            // WebView Game Viewport (stable size container prevents surface resize crashes)
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -300,6 +285,26 @@ fun BaseGameWebView(
                     .background(Color(0xFF040507))
             ) {
                 key(gameUrl, reloadNonce) {
+                    val destroyedFlag = remember(gameUrl, reloadNonce) { AtomicBoolean(false) }
+
+                    fun destroySafely(wv: WebView?) {
+                        if (wv == null) return
+                        if (!destroyedFlag.compareAndSet(false, true)) return
+                        if (webViewInstance == wv) {
+                            webViewInstance = null
+                        }
+                        try {
+                            wv.stopLoading()
+                            wv.onPause()
+                            (wv.parent as? ViewGroup)?.removeView(wv)
+                            wv.clearHistory()
+                            wv.removeAllViews()
+                            wv.destroy()
+                        } catch (e: Exception) {
+                            Log.w(WEBVIEW_TAG, "Safe WebView destroy error", e)
+                        }
+                    }
+
                     AndroidView(
                         factory = { ctx ->
                             if (BuildConfig.DEBUG) {
@@ -312,12 +317,23 @@ fun BaseGameWebView(
                                     ctx.cacheDir.mkdirs()
                                 }
                             } catch (_: Throwable) {}
-                            WebView(ctx).apply {
+
+                            val container = FrameLayout(ctx).apply {
                                 layoutParams = ViewGroup.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                     ViewGroup.LayoutParams.MATCH_PARENT
                                 )
-                                setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                            }
+
+                            val webView = WebView(ctx).apply {
+                                layoutParams = FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT
+                                )
+                                // Keep default LAYER_TYPE_NONE to avoid extra FBO GPU crashes on emulators
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
+                                }
                                 settings.apply {
                                     javaScriptEnabled = true
                                     domStorageEnabled = true
@@ -377,12 +393,7 @@ fun BaseGameWebView(
                                         detail: RenderProcessGoneDetail?
                                     ): Boolean {
                                         Log.e(WEBVIEW_TAG, "WebView renderer process gone (didCrash=${detail?.didCrash()})")
-                                        // Cleanly detach and destroy the dead WebView so app does NOT crash
-                                        (view?.parent as? ViewGroup)?.removeView(view)
-                                        view?.destroy()
-                                        if (webViewInstance == view) {
-                                            webViewInstance = null
-                                        }
+                                        destroySafely(view)
                                         isPageLoading = false
                                         loadError = "ব্রাউজার রেন্ডারার রিস্টার্ট প্রয়োজন। নিচের বাটনে চাপ দিয়ে আবার চালু করুন।"
                                         return true
@@ -401,26 +412,39 @@ fun BaseGameWebView(
                                 }
 
                                 val targetUrl = gameUrl.ifBlank { "https://care-survey-89.prantoofficial46.workers.dev/" }
+                                onResume()
                                 loadUrl(targetUrl)
                                 webViewInstance = this
                             }
+
+                            container.addView(webView)
+                            container
                         },
-                        onRelease = { webView ->
-                            if (webViewInstance == webView) {
-                                webViewInstance = null
-                            }
-                            try {
-                                webView.stopLoading()
-                                webView.onPause()
-                                (webView.parent as? ViewGroup)?.removeView(webView)
-                                webView.clearHistory()
-                                webView.removeAllViews()
-                                webView.destroy()
-                            } catch (e: Exception) {
-                                Log.w(WEBVIEW_TAG, "Safe WebView release cleanup error", e)
-                            }
+                        onRelease = { container ->
+                            val childWebView = (0 until container.childCount)
+                                .map { container.getChildAt(it) }
+                                .filterIsInstance<WebView>()
+                                .firstOrNull()
+                            destroySafely(childWebView ?: webViewInstance)
                         },
                         modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                // Overlaid slim loading progress bar (never shifts WebView height)
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = isPageLoading && loadError == null,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.align(Alignment.TopCenter)
+                ) {
+                    LinearProgressIndicator(
+                        progress = { pageLoadingProgress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(2.dp),
+                        color = StudioGold,
+                        trackColor = StudioSurfaceElevated
                     )
                 }
 

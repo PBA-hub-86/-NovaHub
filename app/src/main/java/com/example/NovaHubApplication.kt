@@ -9,6 +9,9 @@ class NovaHubApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && getProcessName() != packageName) {
+            return
+        }
         prepareIsolatedWebViewStorage()
     }
 
@@ -21,7 +24,7 @@ class NovaHubApplication : Application() {
             if (!cacheDir.exists()) {
                 cacheDir.mkdirs()
             }
-            // Clean up any stale or corrupted WebView cache trees (Default or suffixed) before WebView initializes
+            // Clean up any stale or corrupted WebView cache trees before WebView initializes
             cacheDir.listFiles()?.forEach { entry ->
                 if (entry.name.startsWith("WebView")) {
                     entry.deleteRecursively()
